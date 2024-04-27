@@ -1,0 +1,673 @@
+title: "CTA--final essay"
+author: "S2503736"
+date: "2024-04-26"
+---
+### Because in order to facilitate knit, the codes for crawling data from the two newspapers are displayed separately.
+
+```{r}
+# To get the data -- Crawled data from the New York Times:
+library(httr)  
+library(jsonlite)  
+library(dplyr) 
+
+# Replace with my New York Times API key
+
+nytimes_key \<- "O4jHxkWGKKR41MD3ukczQVtfZVurGGc6"
+
+# Set the base URL for the API
+base_url <- "https://api.nytimes.com/svc/search/v2/articlesearch.json"
+
+# Set the start and end dates
+start_date <- "20201211"
+end_date <- "20211211"
+
+# Define a vector containing keywords
+keywords <- c("covid vaccine", "vaccine", "inocul")
+
+# Initialize a list to store the results
+all_results <- list()
+
+# Iterate over each keyword
+for (keyword in keywords) {
+  page <- 0  # Reset the page counter for each keyword
+  # Assume a maximum of 100 pages of results
+  total_pages <- 50
+  
+  while (page < total_pages) {
+    # Use URLencode to ensure the query string is correctly encoded
+    query <- URLencode(keyword, reserved = TRUE)
+    url <- paste0(base_url, "?q=", query, "&api-key=", nytimes_key,
+                  "&begin_date=", start_date, "&end_date=", end_date,
+                  "&page=", page)
+    
+    # Make an HTTP GET request
+    response <- GET(url)
+    
+    # Check the response status code
+    if (response$status_code == 200) {
+      content <- content(response, "text", encoding = "UTF-8")
+      result <- fromJSON(content)
+      
+      if (length(result$response$docs) == 0) {
+        break  # If no results are found, exit the loop
+      }
+      
+      all_results[[length(all_results) + 1]] <- result$response$docs
+      page <- page + 1
+      
+      # Wait a suitable amount of time between calls to adhere to rate limits
+      Sys.sleep(12)
+    } else {
+      print(paste("Request failed, status code:", response$status_code))
+      break  # Exit the loop if the request fails
+    }
+  }
+}
+
+# Combine each element of the results list (each page's results) into a data frame
+final_results <- bind_rows(lapply(all_results, function(article) {
+  data.frame(
+    title = article$headline$main,
+    pub_date = article$pub_date,
+    stringsAsFactors = FALSE  # Avoid converting strings to factors
+  )
+}))
+
+# Display the final results
+print(final_results)
+```
+
+```{r}
+write.csv(final_results, "/Users/lu/Desktop/CAT-nytimes data.csv", row.names = FALSE)
+```
+```{r}
+final_results <- read.csv("/Users/lu/Desktop/CAT-nytimes data.csv")
+```
+
+###Start the analysis：
+```{r}
+## Before proceeding,Load data and packages
+# Load libraries for data manipulation, text handling, and visualization
+library(tidyverse)    # Includes ggplot2, dplyr, tidyr, readr, and others
+library(stringr)      # For handling text elements
+library(tidytext)     # Includes functions for text manipulation
+library(quanteda)     # For text analytics, includes functions like tokens
+library(quanteda.textmodels) # For text modeling extensions in quanteda
+
+# Load libraries for topic modeling and additional text processing
+library(topicmodels)  # For estimating topic models like LDA
+library(SnowballC)    # For text stemming
+library(tm)           # For text mining
+library(gutenbergr)   # To get text data from Project Gutenberg
+
+# Load libraries for visual enhancements and additional functionalities
+library(scales)       # For scaling functions for visualizations
+library(ggthemes)     # To enhance ggplot visuals
+library(textdata)     # For accessing text datasets and lexicons
+
+# Additional tools for fetching data and pre-processing
+library(academictwitteR) # For fetching Twitter data
+# library(preText)     # Uncomment if used for text pre-processing comparisons (ensure it is installed)
+
+#devtools::install_github("matthewjdenny/preText")
+library(preText)
+library(jsonlite)
+library(readr)
+
+# The devtools library is usually needed for development purposes and installing packages from GitHub
+# library(devtools)   # Uncomment if need to install packages from GitHub
+# devtools::install_github("matthewjdenny/preText") # Install preText package from GitHub
+```
+
+```{r}
+#Inspect and filter data, look at the data:
+head(final_results)
+colnames(final_results)
+
+```
+
+# Manipulate the data
+
+```{r}
+# Manipulate the data into tidy format again, unnesting each token (here: words) from the text of the title.
+
+tidy_final_results <- final_results %>%
+  mutate(title = tolower(title)) %>%  # Convert the 'title' column to lowercase
+  unnest_tokens(word, title) %>%      # Extract words from the 'title' column
+  filter(str_detect(word, "[a-z]"))   # Select only words that contain letters
+
+# Further tidy up the data, as in the previous example, by removing stop words:
+
+tidy_final_results <- tidy_final_results %>%
+  filter(!word %in% stop_words$word)
+```
+
+###Get sentiment dictionaries
+
+```{r}
+#Several sentiment dictionaries come bundled with the tidytext package. These are:
+#AFINN from Finn Årup Nielsen:
+get_sentiments("afinn")
+#bing from Bing Liu and collaborators:
+get_sentiments("bing")
+#nrc from Saif Mohammad and Peter Turney:
+get_sentiments("nrc")
+```
+
+#Sentiment trends over time:
+
+```{r}
+#First let’s make sure the data are properly arranged in ascending order by date.
+
+#gen data variable, order and format date
+tidy_final_results$date <- as.Date(tidy_final_results$pub_date)
+
+tidy_final_results <- tidy_final_results %>%
+  arrange(date)
+
+tidy_final_results$order <- 1:nrow(tidy_final_results)
+
+#Then calculate the sentiment scores for each of sentiment types:
+#get tweet sentiment by date
+tweets_nrc_sentiment <- tidy_final_results %>%
+  inner_join(get_sentiments("nrc"), by = "word", relationship = "many-to-many") %>%
+  count(date, index = order %/% 1000, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment = positive - negative)
+# Accept many-to-many relationships: In sentiment analysis, a word can indeed have multiple emotions. I anticipate that this many-to-many connection is reasonable. Add the parameter relationship = "many-to-many" in inner_join() to explicitly express that this behavior is expected and to suppress the warning.
+tweets_nrc_sentiment %>%
+  ggplot(aes(date, sentiment)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method= loess, alpha=0.25)
+```
+
+```{r}
+## To use different sentiment dictionaries when compared: ---- bing
+tidy_final_results %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(date, index = order %/% 1000, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment = positive - negative) %>%
+  ggplot(aes(date, sentiment)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method= loess, alpha=0.25) +
+  ylab("bing sentiment")
+```
+
+```{r}
+## To use sentiment dictionaries ---- nrc:
+tidy_final_results %>%
+  inner_join(get_sentiments("nrc")) %>%
+  count(date, index = order %/% 1000, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment = positive - negative) %>%
+  ggplot(aes(date, sentiment)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method= loess, alpha=0.25) +
+  ylab("nrc sentiment")
+```
+
+```{r}
+## To use sentiment dictionaries ---- afinn:
+tidy_final_results %>%
+  inner_join(get_sentiments("afinn")) %>%
+  group_by(date, index = order %/% 1000) %>% 
+  summarise(sentiment = sum(value)) %>% 
+  ggplot(aes(date, sentiment)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method= loess, alpha=0.25) +
+  ylab("afinn sentiment")
+
+```
+
+# Create my own sentiment dictionary:---- vaccine_dict:
+
+```{r}
+words <- c('hesitant', 'skeptical', 'doubtful', 'refuse', 'risk', 'concern', 'fear', 
+           'support', 'effective', 'safe', 'protect', 'immunity', 'advocate', 'accept', 
+           'vaccination', 'inoculation', 'dose', 'jab', 'campaign', 'rollout')
+values <- c(-1, -1, -1, -1, -1, -1, -1,    # Negative sentiment values
+            1, 1, 1, 1, 1, 1, 1,         # Positive sentiment values
+            0, 0, 0, 0, 0, 0)            # Neutral sentiment values
+sentiment <- c(rep('negative', 7), rep('positive', 7), rep('neutral', 6))
+
+vaccine_dict <- data.frame(word = words, value = values, sentiment = sentiment)
+
+# Then, bind these to the data and look at the occurrence rate of these words over time:
+tidy_final_results %>%
+  inner_join(vaccine_dict) %>%
+  group_by(date, index = order %/% 1000) %>% 
+  summarise(morwords = sum(value)) %>% 
+  ggplot(aes(date, morwords)) +
+  geom_bar(stat= "identity") +
+  ylab("vaccine_dict words")
+
+# Add the dates:
+vaccine_dict <- c('hesitant', 'skeptical', 'doubtful', 'refuse', 'risk', 'concern', 'fear', 
+                  'support', 'effective', 'safe', 'protect', 'immunity', 'advocate', 'accept', 
+                  'vaccination', 'inoculation', 'dose', 'jab', 'campaign', 'rollout')
+
+#get total per day (no missing dates so no date completion required)
+totals <- tidy_final_results %>%
+  mutate(obs=1) %>%
+  group_by(date) %>%
+  summarise(sum_words = sum(obs))
+
+#plot
+tidy_final_results %>%
+  mutate(obs=1) %>%
+  filter(grepl(paste0(vaccine_dict, collapse = "|"),word, ignore.case = T)) %>%
+  group_by(date) %>%
+  summarise(sum_mwords = sum(obs)) %>%
+  full_join(totals, word, by="date") %>%
+  mutate(sum_mwords= ifelse(is.na(sum_mwords), 0, sum_mwords),
+         pctmwords = sum_mwords/sum_words) %>%
+  ggplot(aes(date, pctmwords)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method= loess, alpha=0.25) +
+  xlab("Date") + ylab("% vaccine_dict words")
+
+```
+
+```{r}
+## Using Lexicoder:
+# To use the quanteda package for the analysis.
+final_results$date <- as.Date(final_results$pub_date)
+tweet_corpus <- corpus(final_results, text_field = "title", docvars = "date")
+# Next, using the tokens() function from quanteda to tokenize the text, removing punctuation along the way:
+toks_news <- tokens(tweet_corpus, remove_punct = TRUE)
+
+# Select only the "negative" and "positive" categories
+data_dictionary_LSD2015_pos_neg <- data_dictionary_LSD2015[1:2]
+toks_news_lsd <- tokens_lookup(toks_news, dictionary = data_dictionary_LSD2015_pos_neg)
+
+# Create a document-feature matrix and group it by date
+dfmat_news_lsd <- dfm(toks_news_lsd) %>% 
+  dfm_group(groups = date)
+
+# Plot positive and negative valence over time
+matplot(dfmat_news_lsd$date, dfmat_news_lsd, type = "l", lty = 1, col = 1:2,
+        ylab = "Frequency", xlab = "")
+grid()
+legend("topleft", col = 1:2, legend = colnames(dfmat_news_lsd), lty = 1, bg = "white")
+
+# Plot overall sentiment (positive - negative) over time
+
+plot(dfmat_news_lsd$date, dfmat_news_lsd[,"positive"] - dfmat_news_lsd[,"negative"], 
+     type = "l", ylab = "Sentiment", xlab = "")
+grid()
+abline(h = 0, lty = 2)
+```
+
+# Below is the topic modeling analysis:
+
+```{r}
+## Step 1: Extract and clean text data:
+# Preprocess the title text
+cleaned_articles <- final_results %>% # add a step for word stemming
+  unnest_tokens(word, title) %>%
+  anti_join(stop_words) %>%
+  filter(str_detect(word, "[a-z]")) %>%  # Only retain words containing letters
+  mutate(stem = wordStem(word, language = "en"))  # Add word stemming
+
+## Step 2: Create a Document-Term Matrix (DTM):
+dtm <- cleaned_articles %>%
+  count(date, stem) %>%  # Note here we use the 'stem' column
+  cast_dtm(date, stem, n)
+
+## Step 3: Estimate the topic model:
+# Estimate an LDA topic model, assuming we want to find 5 topics
+lda_model <- LDA(dtm, k = 5, control = list(seed = 1234))
+
+## Step 4: View topics:
+# Extract the words and their probabilities for each topic in the model
+topic_terms <- tidy(lda_model, matrix = "beta")
+
+# View the top 10 words for each topic
+top_terms <- topic_terms %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+# Print results
+print(top_terms)
+```
+
+```{r}
+## Step 5: Visualize the topics:
+# Visualize the top 10 words for each topic
+top_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free_y") +
+  coord_flip() +
+  scale_x_reordered()
+
+## Step 6: Validate the model:
+# View the most likely topic for each document
+document_topics <- tidy(lda_model, matrix = "gamma") %>%
+  group_by(document) %>%
+  top_n(1, gamma) %>%
+  ungroup()
+
+# Print results
+print(document_topics)
+```
+
+# Guardian Data:
+
+## To get Guardian Data:
+
+install.packages("guardianapi")
+
+# install.packages("devtools")
+devtools::install_github("evanodell/guardianapi")
+
+
+gu_api_key(check_env = FALSE)
+
+#24f78b1a-f32e-4118-a88c-e5ca6ee42057
+
+library(guardianapi)
+
+#“vaccin”, “vaxx”, or “inocul” 
+
+guardian_vaccin <- gu_content(query = "(vaccin OR vaxx OR inocul) AND covid", from_date = "2020-12-11",
+                              to_date = "2021-12-11")
+
+write.csv(guardian_vaccin, "/Users/lu/Desktop/CAT-Raw guardian data.csv", row.names = FALSE)
+
+
+
+
+# 提取 newspaper_edition_date 和 headline 列
+selected_columns_vaccin <- guardian_vaccin[c("newspaper_edition_date", "headline")]
+
+
+write.csv(selected_columns_vaccin, "/Users/lu/Desktop/CAT-guardian data.csv", row.names = FALSE)
+
+```{r}
+selected_columns_vaccin <- read.csv("/Users/lu/Desktop/CAT-guardian data.csv")
+```
+
+```{r}
+# Manipulate the data into tidy format again, unnesting each token (here: words) from the text of the title.
+
+tidy_selected_columns_vaccin <- selected_columns_vaccin %>%
+  mutate(headline = tolower(headline)) %>%  # Convert the 'title' column to lowercase
+  unnest_tokens(word, headline) %>%      # Extract words from the 'title' column
+  filter(str_detect(word, "[a-z]"))   # Select only words that contain letters
+
+# Further tidy up the data, as in the previous example, by removing stop words:
+tidy_selected_columns_vaccin <- tidy_selected_columns_vaccin %>%
+  filter(!word %in% stop_words$word)
+```
+
+#Sentiment trends over time:
+
+```{r}
+#First let’s make sure the data are properly arranged in ascending order by date.
+
+#gen data variable, order and format date
+tidy_selected_columns_vaccin$date <- as.Date(tidy_selected_columns_vaccin$newspaper_edition_date)
+
+tidy_selected_columns_vaccin <- tidy_selected_columns_vaccin %>%
+  arrange(date)
+
+tidy_selected_columns_vaccin$order <- 1:nrow(tidy_selected_columns_vaccin)
+
+#Then calculate the sentiment scores for each of sentiment types:
+#get tweet sentiment by date
+tweets_nrc_sentiment_g <- tidy_selected_columns_vaccin %>%
+  inner_join(get_sentiments("nrc"), by = "word", relationship = "many-to-many") %>%
+  count(date, index = order %/% 1000, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment = positive - negative)
+# Accept many-to-many relationships: In sentiment analysis, a word can indeed have multiple emotions. I anticipate that this many-to-many connection is reasonable. Add the parameter relationship = "many-to-many" in inner_join() to explicitly express that this behavior is expected and to suppress the warning.
+tweets_nrc_sentiment_g %>%
+  ggplot(aes(date, sentiment)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method= loess, alpha=0.25)
+```
+
+```{r}
+## To use different sentiment dictionaries when compared: ---- bing
+tidy_selected_columns_vaccin %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(date, index = order %/% 1000, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment = positive - negative) %>%
+  ggplot(aes(date, sentiment)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method= loess, alpha=0.25) +
+  ylim(-20, 10) +  
+  ylab("bing sentiment")
+
+## To use sentiment dictionaries ---- nrc:
+tidy_selected_columns_vaccin %>%
+  inner_join(get_sentiments("nrc")) %>%
+  count(date, index = order %/% 1000, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment = positive - negative) %>%
+  ggplot(aes(date, sentiment)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method= loess, alpha=0.25) +
+  ylim(-10, 20) +  
+  ylab("nrc sentiment")
+
+## To use sentiment dictionaries ---- afinn:
+tidy_selected_columns_vaccin %>%
+  inner_join(get_sentiments("afinn")) %>%
+  group_by(date, index = order %/% 1000) %>% 
+  summarise(sentiment = sum(value)) %>% 
+  ggplot(aes(date, sentiment)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method= loess, alpha=0.25) +
+  ylim(-40, 40) + 
+  ylab("afinn sentiment")
+```
+
+```{r}
+words <- c('hesitant', 'skeptical', 'doubtful', 'refuse', 'risk', 'concern', 'fear', 
+           'support', 'effective', 'safe', 'protect', 'immunity', 'advocate', 'accept', 
+           'vaccination', 'inoculation', 'dose', 'jab', 'campaign', 'rollout')
+values <- c(-1, -1, -1, -1, -1, -1, -1,    # Negative sentiment values
+            1, 1, 1, 1, 1, 1, 1,         # Positive sentiment values
+            0, 0, 0, 0, 0, 0)            # Neutral sentiment values
+sentiment <- c(rep('negative', 7), rep('positive', 7), rep('neutral', 6))
+
+vaccine_dict <- data.frame(word = words, value = values, sentiment = sentiment)
+
+# Then, bind these to the data and look at the occurrence rate of these words over time:
+tidy_selected_columns_vaccin %>%
+  inner_join(vaccine_dict) %>%
+  group_by(date, index = order %/% 1000) %>% 
+  summarise(morwords = sum(value)) %>% 
+  ggplot(aes(date, morwords)) +
+  geom_bar(stat= "identity") +
+  ylab("vaccine_dict words")
+
+# Add the dates:
+vaccine_dict <- c('hesitant', 'skeptical', 'doubtful', 'refuse', 'risk', 'concern', 'fear', 
+                  'support', 'effective', 'safe', 'protect', 'immunity', 'advocate', 'accept', 
+                  'vaccination', 'inoculation', 'dose', 'jab', 'campaign', 'rollout')
+
+#get total per day (no missing dates so no date completion required)
+totals <- tidy_selected_columns_vaccin %>%
+  mutate(obs=1) %>%
+  group_by(date) %>%
+  summarise(sum_words = sum(obs))
+
+#plot
+tidy_selected_columns_vaccin %>%
+  mutate(obs=1) %>%
+  filter(grepl(paste0(vaccine_dict, collapse = "|"),word, ignore.case = T)) %>%
+  group_by(date) %>%
+  summarise(sum_mwords = sum(obs)) %>%
+  full_join(totals, word, by="date") %>%
+  mutate(sum_mwords= ifelse(is.na(sum_mwords), 0, sum_mwords),
+         pctmwords = sum_mwords/sum_words) %>%
+  ggplot(aes(date, pctmwords)) +
+  geom_point(alpha=0.5) +
+  geom_smooth(method= loess, alpha=0.25) +
+  xlab("Date") + ylab("% vaccine_dict words_guardian")
+
+```
+
+```{r}
+## Using Lexicoder:
+# To use the quanteda package for the analysis.
+selected_columns_vaccin$date <- as.Date(selected_columns_vaccin$newspaper_edition_date)
+tweet_corpus_g <- corpus(selected_columns_vaccin, text_field = "headline", docvars = "newspaper_edition_date")
+# Next, using the tokens() function from quanteda to tokenize the text, removing punctuation along the way:
+toks_news_g <- tokens(tweet_corpus_g, remove_punct = TRUE)
+
+# Select only the "negative" and "positive" categories
+data_dictionary_LSD2015_pos_neg_g <- data_dictionary_LSD2015[1:2]
+toks_news_lsd_g <- tokens_lookup(toks_news_g, dictionary = data_dictionary_LSD2015_pos_neg_g)
+
+# Create a document-feature matrix and group it by date
+dfmat_news_lsd_g <- dfm(toks_news_lsd_g) %>% 
+  dfm_group(groups = date)
+
+# Plot positive and negative valence over time
+matplot(dfmat_news_lsd_g$date, dfmat_news_lsd_g, type = "l", lty = 1, col = 1:2,
+        ylab = "Frequency", xlab = "")
+grid()
+legend("topleft", col = 1:2, legend = colnames(dfmat_news_lsd_g), lty = 1, bg = "white")
+
+# Plot overall sentiment (positive - negative) over time
+
+plot(dfmat_news_lsd_g$date, dfmat_news_lsd_g[,"positive"] - dfmat_news_lsd_g[,"negative"], 
+     type = "l", ylab = "Sentiment", xlab = "")
+grid()
+abline(h = 0, lty = 2)
+```
+
+# Below is the topic modeling analysis:
+
+```{r}
+## Step 1: Extract and clean text data:
+# Preprocess the title text
+cleaned_articles_g <- selected_columns_vaccin %>% # add a step for word stemming
+  unnest_tokens(word, headline) %>%
+  anti_join(stop_words) %>%
+  filter(str_detect(word, "[a-z]")) %>%  # Only retain words containing letters
+  mutate(stem = wordStem(word, language = "en"))  # Add word stemming
+
+## Step 2: Create a Document-Term Matrix (DTM):
+dtm_g <- cleaned_articles_g %>%
+  count(date, stem) %>%  # Note here we use the 'stem' column
+  cast_dtm(date, stem, n)
+
+## Step 3: Estimate the topic model:
+# Estimate an LDA topic model, assuming we want to find 5 topics
+lda_model_g <- LDA(dtm_g, k = 5, control = list(seed = 1234))
+
+## Step 4: View topics:
+# Extract the words and their probabilities for each topic in the model
+topic_terms_g <- tidy(lda_model_g, matrix = "beta")
+
+# View the top 10 words for each topic
+top_terms_g <- topic_terms_g %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+# Print results
+print(top_terms_g)
+```
+
+```{r}
+## Step 5: Visualize the topics:
+# Visualize the top 10 words for each topic
+top_terms_g %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free_y") +
+  coord_flip() +
+  scale_x_reordered()
+
+## Step 6: Validate the model:
+# View the most likely topic for each document
+document_topics_g <- tidy(lda_model_g, matrix = "gamma") %>%
+  group_by(document) %>%
+  top_n(1, gamma) %>%
+  ungroup()
+
+# Print results
+print(document_topics_g)
+```
+
+#Evaluating topic model： \## Plot relative word frequencies
+
+```{r}
+# Make sure both datasets have the same column names
+nytimes_vaccin_formatted <- final_results %>%
+  rename(date = date, word = title) %>%
+  mutate(source = "NYTimes")
+```
+
+```{r}
+guardian_vaccin_formatted <- selected_columns_vaccin %>%
+  rename(date = date, word = headline) %>%
+  mutate(source = "Guardian")
+```
+
+```{r}
+# combine
+combined_data <- bind_rows(nytimes_vaccin_formatted, guardian_vaccin_formatted)
+```
+
+```{r}
+# Assuming the column with datetime strings is named 'public-date' in your dataframe
+combined_data$date <- as.Date(sub("T.*", "", combined_data$date))
+
+```
+
+```{r}
+# Clean text data
+tidy_combined_data <- combined_data %>%
+  unnest_tokens(word, word) %>%
+  anti_join(stop_words)
+## Joining with `by = join_by(word)`
+## Count most common words in both
+tidy_combined_data %>%
+  count(word, sort = TRUE)
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(tidytext)
+
+# Continue the previous steps to calculate the proportion of words in each source
+news_freq <- tidy_combined_data %>%
+  count(source, word) %>%
+  group_by(source) %>%
+  mutate(proportion = n / sum(n)) %>%
+  ungroup() %>%
+  select(-n) %>% 
+  spread(source, proportion)
+
+# NA may need to be handled before scale calculation as spread may introduce NA
+news_freq[is.na(news_freq)] <- 0
+
+# Use ggplot2 to create comparison charts
+ggplot(news_freq, aes(x = `NYTimes`, y = `Guardian`, color = abs(`NYTimes` - `Guardian`))) +
+  geom_abline(color = "gray40", lty = 2) +
+  geom_jitter(alpha = 0.1, size = 2.5, width = 0.3, height = 0.3) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5) +
+  scale_x_log10(labels = scales::percent_format()) +
+  scale_y_log10(labels = scales::percent_format()) +
+  scale_color_gradient(limits = c(0, 0.001), low = "darkslategray4", high = "gray75") +
+  theme_minimal() +
+  theme(legend.position="none",
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "NYTimes Proportion", y = "Guardian Proportion") +
+  coord_fixed()
+
+```
